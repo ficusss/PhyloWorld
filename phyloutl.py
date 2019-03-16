@@ -1,4 +1,4 @@
-import sys, os, glob
+import  os, glob
 import numpy as np
 import subprocess
 import ete3
@@ -12,10 +12,7 @@ import Bio.Blast.NCBIWWW as Blast
 from Bio.Seq import Seq
 from skbio import nj, DistanceMatrix
 from Bio import AlignIO, SeqIO
-from itertools import permutations
-from collections import defaultdict, deque
-from itertools import combinations, product
-from pandas import DataFrame
+from collections import deque
 
 __rscript_tangle = '''library(phytools)
 library(dendextend)
@@ -60,7 +57,7 @@ def parse_path(out):
     return output_dir, output_filename
 
 
-def retry(f, logfile, *args, **argw):
+def retry(f, *args, **argw):
     global __RETRIES
     global __SLEEP_TIME_RETRY
     last_error = None
@@ -68,9 +65,6 @@ def retry(f, logfile, *args, **argw):
         try:
             return f(*args, **argw)
         except Exception as e:
-            if logfile:
-                logfile.write("Error: {}. Attempt {}/{}\n".format(e, i + 1,
-                              __RETRIES))
             last_error = e
             sleep(__SLEEP_TIME_RETRY)
     raise last_error
@@ -290,14 +284,14 @@ def create_tree_of_trees(trees: dict, out, metric='score', outgroup=''):
         tree.write(outfile=out)
     return tree
 
-def get_gene(gene, specie, logfile=None, db='nuccore'):
+def get_gene(gene, specie, db='nuccore'):
     search_str = "{}[Gene] AND {}[Organism]".format(gene, specie)
     search_str += " AND mRNA[Filter] AND RefSeq[Filter]"
-    h = retry(Entrez.esearch, logfile, term=search_str, db=db)
+    h = retry(Entrez.esearch, term=search_str, db=db)
     records = Entrez.read(h)
     fasta, i = None, None
     for i in records['IdList']:
-        fasta = get_gene_by_id(i, logfile, db=db)
+        fasta = get_gene_by_id(i, db=db)
         if fasta:
             break
     if i is None:
@@ -305,58 +299,49 @@ def get_gene(gene, specie, logfile=None, db='nuccore'):
         raise Exception(s)
     return i, fasta
 
-def get_gene_by_id(identificator, logfile=None, db='nuccore'):
-    h = retry(Entrez.efetch, logfile, db='nuccore', id=identificator,
+def get_gene_by_id(identificator, db='nuccore'):
+    h = retry(Entrez.efetch, db='nuccore', id=identificator,
               rettype="fasta_cds_na", retmode="text")
     record = h.read()
     fasta = record.rstrip('\n')
     t = fasta.split('\n')
     if len(t) < 2 or len(t[1].replace(' ', '')) <= 1:
-        if logfile:
-            s = "Couldn't retrieve a CDS from {}.\n".format(identificator)
-            logfile.write(s)
         return None
     return fasta
 
-def get_homologous_seqs(nuc_fasta, specie, logfile=None, ret_max=5):
+def get_homologous_seqs(nuc_fasta, specie, ret_max=5):
     t = nuc_fasta.split('\n')
     h = t[0]
     t = ''.join(t[1:])
     amino_seq = str(Seq(t).translate(cds=True))
     amino_fasta = '{}\n{}'.format(h, amino_seq)
-    blast_res = retry(Blast.qblast, logfile, 'tblastn', 'nt', amino_fasta,
-                      expect=0.1, entrez_query="{}[ORGANISM]".format(specie))
+    blast_res = retry(Blast.qblast, 'tblastn', 'nt', amino_fasta,
+                      hitlist_size=ret_max + 2, expect=0.1,
+                      alignments=ret_max * 10, descriptions=ret_max * 10,
+                      entrez_query="{}[ORGANISM]".format(specie))
     rec = BlastXML.read(blast_res)
     if not rec.alignments:
-        if logfile:
-            s = "tblastn found no results, trying blastn (no megablast).\n"
-            logfile.write(s)
-        blast_res = retry(Blast.qblast, logfile, 'blastn', 'nt', nuc_fasta,
+        blast_res = retry(Blast.qblast, 'blastn', 'nt', nuc_fasta,
                           expect=0.1,
                           entrez_query="{}[ORGANISM]".format(specie))
         rec = BlastXML.read(blast_res)
     fastas = list()
     for aln in rec.alignments:
         i = int(aln.title.split('|')[1])
-        if logfile:
-            s = "Sending a request for gene ID = {}...\n".format(i)
-            logfile.write(s)
-        fasta = get_gene_by_id(i, logfile)
+        fasta = get_gene_by_id(i)
         if fasta:
             fastas.append(fasta)
-            if logfile:
-                logfile.write("Success.\n")
             if len(fastas) >= ret_max:
                 break
     return fastas
 
-def get_homologous_seqs_retry(nuc_fasta, specie, logfile=None, ret_max=5):
+def get_homologous_seqs_retry(nuc_fasta, specie, ret_max=5):
     def wrapper():
-        ret = get_homologous_seqs(nuc_fasta, specie, logfile, ret_max)
+        ret = get_homologous_seqs(nuc_fasta, specie, ret_max)
         if not ret:
             raise Exception("Couldn't find any homologic seqs for {}".format(specie))
         return ret
-    return retry(wrapper, logfile)
+    return retry(wrapper)
 
 def get_short_headed(fasta, specie):
     header = '>{}'.format(specie.replace(' ', '_'))
@@ -364,58 +349,26 @@ def get_short_headed(fasta, specie):
     return fasta
 
 def naive_score(seq_a, seq_b):
-    return sum(1 for a, b in zip(seq_a, seq_b) if a == b)    
+    return sum(1 for a, b in zip(seq_a, seq_b) if a == b)
+
 
 def retrieve_sequences(genes, species, ref_organism='Homo sapien',
-                       logfile=sys.stdout, email='herrberg@yandex.ru',
-                       short_headers=True, expected_families=list()):
-    Entrez.email = email
+                       short_headers=True):
     d = dict()
     for gene in genes:
         print("{}".format(gene))
-        logfile.write("Sending request to NCBI for  gene {}...\n".format(gene))
-        i, fasta = get_gene(gene, ref_organism, logfile)
-        logfile.write("ID = {}\n".format(i))
+        i, fasta = get_gene(gene, ref_organism)
         if short_headers:
                     fasta = get_short_headed(fasta, ref_organism)
         d[gene] = [fasta]
         tmp = dict()
         for specie in species:
             print("\t{}".format(specie))
-            logfile.write("Sending a BLAST request to NCBI for specie {}\n".format(specie))
-            res = get_homologous_seqs_retry(d[gene][0], specie, logfile)
-            if not res:
-                s = "Couldn't find anything for specie {}.\n".format(specie)
-                logfile.write(s)
-            else:
+            res = get_homologous_seqs_retry(d[gene][0], specie)
+            if res:
                 tmp[specie] = res
-        # Family testing
-        logfile.write("Performing family testing...")
-        tmp_seq = dict()
-        for specie, fastas in tmp.items():
-            seqs = [''.join(fasta.split('\n')[1:]) for fasta in fastas]
-            tmp_seq[specie] = seqs
-        for fam in expected_families:
-            for specie_a, specie_b in combinations(fam, 2):
-                if specie_a not in tmp or specie_b not in tmp:
-                    print("Warning: couldn't retrieve some of the species.")
-                    continue
-                a = tmp_seq[specie_a]
-                inds_a = list(range(len(a)))
-                b = tmp_seq[specie_b]
-                inds_b = list(range(len(b)))
-                i, j = max(product(inds_a, inds_b),
-                           key=lambda x: naive_score(a[x[0]], b[x[1]]))
-                t = [tmp[specie_a][i]]
-                tmp[specie_a] = t
-                tmp_seq[specie_a] = t
-                t = [tmp[specie_b][j]]
-                tmp[specie_b] = t
-                tmp_seq[specie_b] = t
-        logfile.write('Selected IDs:\n')
         for specie, items in tmp.items():
             fasta = items[0]
-            logfile.write('{}: {}\n'.format(specie, fasta.split('\n')[0][1:]))
             if short_headers:
                 fasta = get_short_headed(fasta, specie)
             d[gene].append(fasta)
@@ -424,9 +377,8 @@ def retrieve_sequences(genes, species, ref_organism='Homo sapien',
 def get_reverse_evol_nucs(tree: ete3.Tree):
     pass
 
-def merge_fasta(dictionary, logfile=sys.stdout):
+def merge_fasta(dictionary):
     d = dict()
-    logfile.write("Merging FAST data into multi-FAST format...\n")
     for gene, fastas in dictionary.items():
         d[gene] = '\n'.join(fastas)
     return d
