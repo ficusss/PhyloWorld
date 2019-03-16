@@ -40,7 +40,7 @@ print(dist.topo(a, b, method=c))
 
 __RETRIES = 3
 __SLEEP_TIME_RETRY = 2
-
+Entrez.email = 'grisha.fioktistov@yandex.ru'
 
 def parse_path(out):
     t = out.split('/')
